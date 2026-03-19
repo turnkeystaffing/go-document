@@ -15,6 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Cross-file test dependencies:
+//   - makeSuccessResponseBody (from http_provider_test.go) — used by contractTestHandler
+//   - newFakeTokenServer (from authenticated_provider_test.go) — used by TestAuthenticatedProviderContract
+
 // providerContract defines a contract test suite that all Provider implementations must pass.
 type providerContract struct {
 	// newProvider creates a fresh provider instance for each subtest.
@@ -190,6 +194,7 @@ func TestAuthenticatedProviderContract(t *testing.T) {
 	providerContract{
 		newProvider: func(t *testing.T) Provider {
 			ts := newFakeTokenServer(t) // from authenticated_provider_test.go (same package)
+			t.Cleanup(ts.Close)
 			ds := newAuthContractTestServer(t)
 
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))

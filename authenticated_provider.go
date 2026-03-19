@@ -74,6 +74,9 @@ func validateURL(rawURL, fieldName string) error {
 	if u.Host == "" {
 		return fmt.Errorf("document: authenticated provider: %s must include a host", fieldName)
 	}
+	if u.Fragment != "" {
+		return fmt.Errorf("document: authenticated provider: %s must not contain a fragment", fieldName)
+	}
 	return nil
 }
 
@@ -165,6 +168,8 @@ func (ap *AuthenticatedProvider) Render(ctx context.Context, req RenderRequest) 
 
 // Close shuts down the token provider, cancelling any in-flight refresh
 // goroutines and clearing cached tokens. Idempotent.
+// The current go-authclient implementation always returns nil; the error
+// return satisfies io.Closer for use with generic cleanup utilities.
 func (ap *AuthenticatedProvider) Close() error {
 	return ap.tokenProvider.Close()
 }

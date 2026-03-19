@@ -39,6 +39,11 @@ func newFakeTokenServer(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client"})
 			return
 		}
+		// Validate Content-Type per RFC 6749 §4.4.2.
+		if ct := r.Header.Get("Content-Type"); ct != "" && ct != "application/x-www-form-urlencoded" {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
 		// Validate grant_type is client_credentials.
 		if err := r.ParseForm(); err != nil || r.FormValue("grant_type") != "client_credentials" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -293,6 +298,7 @@ func newSlowTokenServer(t *testing.T) *httptest.Server {
 		select {
 		case <-r.Context().Done():
 		case <-time.After(500 * time.Millisecond):
+			w.WriteHeader(http.StatusGatewayTimeout)
 		}
 	}))
 }
@@ -617,6 +623,34 @@ func TestNewAuthenticatedProvider_TokenURLNoHost(t *testing.T) {
 	assert.Contains(t, err.Error(), "token URL must include a host")
 }
 
+func TestNewAuthenticatedProvider_BaseURLWithFragment(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com/path#fragment",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "https://auth.example.com/oauth/token",
+	}, slog.Default())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base URL must not contain a fragment")
+}
+
+func TestNewAuthenticatedProvider_TokenURLWithFragment(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "https://auth.example.com/oauth/token#section",
+	}, slog.Default())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token URL must not contain a fragment")
+}
+
 func TestAuthenticatedProviderConfig_StringRedactsSecret(t *testing.T) {
 	t.Parallel()
 
@@ -633,6 +667,11 @@ func TestAuthenticatedProviderConfig_StringRedactsSecret(t *testing.T) {
 	assert.Contains(t, s, "my-client")
 	assert.Contains(t, s, "[REDACTED]")
 	assert.NotContains(t, s, "super-secret-value", "String() must not expose ClientSecret")
+
+	// Verify all 6 field names appear in output.
+	for _, field := range []string{"BaseURL:", "ClientID:", "ClientSecret:", "TokenURL:", "Scopes:", "HTTPTimeout:"} {
+		assert.Contains(t, s, field, "String() output must include field %s", field)
+	}
 
 	// Verify zero-value fields render without panic.
 	zeroCfg := AuthenticatedProviderConfig{}
@@ -656,6 +695,7 @@ func TestAuthenticatedProviderConfig_StringRedactsTokenURLQueryParams(t *testing
 	s := cfg.String()
 	assert.NotContains(t, s, "my-secret-key", "String() must not expose TokenURL query params")
 	assert.Contains(t, s, "[REDACTED]", "TokenURL query params should be redacted")
+	assert.Contains(t, s, "auth.example.com/oauth/token", "URL path/host must survive redaction")
 }
 
 func TestAuthenticatedProvider_EmptyTokenFromServer(t *testing.T) {
