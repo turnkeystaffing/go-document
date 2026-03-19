@@ -27,6 +27,15 @@ const defaultHTTPTimeout = 60 * time.Second
 // excessively large values from causing indefinite waits in consumer retry loops.
 const maxRetryAfterSeconds = 3600
 
+// maxErrorDescriptionBytes is the maximum number of bytes included in the
+// Description field of a ProviderError when the response body cannot be parsed
+// as structured JSON. Truncation happens on the raw byte slice before string
+// conversion to avoid allocating a large intermediate string.
+const maxErrorDescriptionBytes = 256
+
+// renderEndpoint is the path for the document rendering API endpoint.
+const renderEndpoint = "/v1/render"
+
 // HeaderFunc returns dynamic HTTP headers to include with each request.
 // Used by AuthenticatedProvider to inject Bearer tokens, or by consumers
 // for custom header injection (API keys, correlation IDs, etc.).
@@ -134,7 +143,7 @@ func (p *HTTPProvider) Render(ctx context.Context, req RenderRequest) (*RenderRe
 		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/render", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+renderEndpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, &ProviderError{
 			Code:        "request_failed",
@@ -255,13 +264,14 @@ func (p *HTTPProvider) parseErrorResponse(resp *http.Response, body []byte) *Pro
 	} else {
 		// Fallback: use HTTP status text and truncated body.
 		pe.Code = http.StatusText(resp.StatusCode)
-		desc := string(body)
-		if len(desc) > 256 {
-			desc = desc[:256]
-			// Ensure truncation doesn't split a multi-byte UTF-8 character.
-			for !utf8.ValidString(desc) && len(desc) > 0 {
-				desc = desc[:len(desc)-1]
-			}
+		truncated := body
+		if len(truncated) > maxErrorDescriptionBytes {
+			truncated = truncated[:maxErrorDescriptionBytes]
+		}
+		desc := string(truncated)
+		// Ensure truncation doesn't split a multi-byte UTF-8 character.
+		for !utf8.ValidString(desc) && len(desc) > 0 {
+			desc = desc[:len(desc)-1]
 		}
 		pe.Description = desc
 	}
