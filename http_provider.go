@@ -29,8 +29,10 @@ const maxRetryAfterSeconds = 3600
 
 // maxErrorDescriptionBytes is the maximum number of bytes included in the
 // Description field of a ProviderError when the response body cannot be parsed
-// as structured JSON. Truncation happens on the raw byte slice before string
-// conversion to avoid allocating a large intermediate string.
+// as structured JSON. Truncation to this limit happens on the raw byte slice
+// before string conversion, avoiding a large intermediate string allocation.
+// A subsequent UTF-8 validity pass on the (small) resulting string trims any
+// incomplete multi-byte sequence at the truncation boundary.
 const maxErrorDescriptionBytes = 256
 
 // renderEndpoint is the path for the document rendering API endpoint.

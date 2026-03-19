@@ -770,6 +770,25 @@ func TestHTTPProviderErrorBodyUTF8Truncation(t *testing.T) {
 	assert.True(t, utf8.ValidString(pe.Description), "truncated description must be valid UTF-8")
 }
 
+func TestHTTPProviderSmallInvalidUTF8Body(t *testing.T) {
+	// Body under 256 bytes but with trailing invalid UTF-8 (incomplete multi-byte sequence).
+	// This verifies the UTF-8 validity pass runs unconditionally, not just on truncated bodies.
+	body := append([]byte("server error "), 0xC3) // 0xC3 starts a 2-byte sequence but has no continuation
+	require.Less(t, len(body), maxErrorDescriptionBytes, "test body must be under the truncation limit")
+	require.False(t, utf8.Valid(body), "test body must contain invalid UTF-8")
+
+	srv := newTestServer(t, http.StatusBadGateway, nil, body)
+	defer srv.Close()
+
+	provider := NewHTTPProvider(HTTPProviderConfig{BaseURL: srv.URL})
+	_, err := provider.Render(context.Background(), RenderRequest{Content: "x", ContentType: ContentTypeHTML, Format: FormatPDF})
+
+	var pe *ProviderError
+	require.True(t, errors.As(err, &pe))
+	assert.Equal(t, "server error ", pe.Description, "trailing invalid byte should be trimmed")
+	assert.True(t, utf8.ValidString(pe.Description), "description must be valid UTF-8 even for small bodies")
+}
+
 func TestHTTPProviderEmptyResponseBody200(t *testing.T) {
 	srv := newTestServer(t, http.StatusOK, nil, []byte{})
 	defer srv.Close()
@@ -864,6 +883,66 @@ func TestHTTPProviderValidationBeforeHTTPCall(t *testing.T) {
 	assert.Equal(t, "content", ve.Field)
 	assert.Equal(t, "required", ve.Code)
 	assert.False(t, requestReceived.Load(), "server should not receive request for invalid input")
+}
+
+func TestHTTPProviderErrorDescriptionExactly256Bytes(t *testing.T) {
+	// Body with exactly maxErrorDescriptionBytes (256) ASCII bytes should NOT be truncated.
+	body := strings.Repeat("a", maxErrorDescriptionBytes)
+	require.Equal(t, maxErrorDescriptionBytes, len(body), "test setup: body must be exactly 256 bytes")
+
+	srv := newTestServer(t, http.StatusBadGateway, nil, []byte(body))
+	defer srv.Close()
+
+	provider := NewHTTPProvider(HTTPProviderConfig{BaseURL: srv.URL})
+	_, err := provider.Render(context.Background(), RenderRequest{Content: "x", ContentType: ContentTypeHTML, Format: FormatPDF})
+
+	var pe *ProviderError
+	require.True(t, errors.As(err, &pe))
+	assert.Equal(t, maxErrorDescriptionBytes, len(pe.Description), "description at exactly the limit should not be truncated")
+	assert.Equal(t, body, pe.Description)
+}
+
+func TestHTTPProviderErrorDescriptionOneByteBeyondLimit(t *testing.T) {
+	// Body with maxErrorDescriptionBytes+1 (257) ASCII bytes should be truncated to exactly 256.
+	body := strings.Repeat("b", maxErrorDescriptionBytes+1)
+	require.Equal(t, maxErrorDescriptionBytes+1, len(body), "test setup: body must be exactly 257 bytes")
+
+	srv := newTestServer(t, http.StatusBadGateway, nil, []byte(body))
+	defer srv.Close()
+
+	provider := NewHTTPProvider(HTTPProviderConfig{BaseURL: srv.URL})
+	_, err := provider.Render(context.Background(), RenderRequest{Content: "x", ContentType: ContentTypeHTML, Format: FormatPDF})
+
+	var pe *ProviderError
+	require.True(t, errors.As(err, &pe))
+	assert.Equal(t, maxErrorDescriptionBytes, len(pe.Description), "description one byte beyond limit should be truncated to exactly 256 bytes")
+	assert.Equal(t, strings.Repeat("b", maxErrorDescriptionBytes), pe.Description)
+}
+
+func TestHTTPProviderNonRetryableStatusCodes(t *testing.T) {
+	// Verify that common non-retryable status codes are NOT marked retryable.
+	// Complements existing tests for retryable codes (408, 429, 503).
+	codes := []int{
+		http.StatusNotFound,       // 404
+		http.StatusBadGateway,     // 502
+		http.StatusGatewayTimeout, // 504
+	}
+
+	for _, code := range codes {
+		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
+			body := makeErrorResponseBody(t, "test_error", "test description")
+			srv := newTestServer(t, code, nil, body)
+			defer srv.Close()
+
+			provider := NewHTTPProvider(HTTPProviderConfig{BaseURL: srv.URL})
+			_, err := provider.Render(context.Background(), RenderRequest{Content: "x", ContentType: ContentTypeHTML, Format: FormatPDF})
+
+			var pe *ProviderError
+			require.True(t, errors.As(err, &pe))
+			assert.Equal(t, code, pe.StatusCode)
+			assert.False(t, pe.Retryable, "status %d should not be retryable", code)
+		})
+	}
 }
 
 func TestHTTPProviderConstructorMaxResponseSizeOverflowProtection(t *testing.T) {
