@@ -284,16 +284,23 @@ func TestAuthenticatedProvider_TokenAcquisitionFailure(t *testing.T) {
 	assert.NotNil(t, pe.Err, "should wrap the underlying token error")
 }
 
-func TestAuthenticatedProvider_ContextCancellation(t *testing.T) {
-	t.Parallel()
-
-	// Slow token server — will be cancelled before responding
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// newSlowTokenServer creates a test HTTP server that delays response until the
+// request context is cancelled or 500ms elapses. Used by context cancellation
+// and deadline tests.
+func newSlowTokenServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 		case <-time.After(500 * time.Millisecond):
 		}
 	}))
+}
+
+func TestAuthenticatedProvider_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := newSlowTokenServer(t)
 	defer tokenServer.Close()
 
 	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
@@ -487,13 +494,7 @@ func TestAuthenticatedProvider_RenderAfterClose(t *testing.T) {
 func TestAuthenticatedProvider_ContextDeadlineErrorChain(t *testing.T) {
 	t.Parallel()
 
-	// Slow token server — will be cancelled before responding.
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-time.After(500 * time.Millisecond):
-		}
-	}))
+	tokenServer := newSlowTokenServer(t)
 	defer tokenServer.Close()
 
 	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
@@ -602,6 +603,20 @@ func TestNewAuthenticatedProvider_BaseURLNoHost(t *testing.T) {
 	assert.Contains(t, err.Error(), "base URL must include a host")
 }
 
+func TestNewAuthenticatedProvider_TokenURLNoHost(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "http://",
+	}, slog.Default())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token URL must include a host")
+}
+
 func TestAuthenticatedProviderConfig_StringRedactsSecret(t *testing.T) {
 	t.Parallel()
 
@@ -618,6 +633,29 @@ func TestAuthenticatedProviderConfig_StringRedactsSecret(t *testing.T) {
 	assert.Contains(t, s, "my-client")
 	assert.Contains(t, s, "[REDACTED]")
 	assert.NotContains(t, s, "super-secret-value", "String() must not expose ClientSecret")
+
+	// Verify zero-value fields render without panic.
+	zeroCfg := AuthenticatedProviderConfig{}
+	zeroStr := zeroCfg.String()
+	assert.Contains(t, zeroStr, "ClientSecret:[REDACTED]")
+	assert.Contains(t, zeroStr, "HTTPTimeout:0s")
+}
+
+func TestAuthenticatedProviderConfig_StringRedactsTokenURLQueryParams(t *testing.T) {
+	t.Parallel()
+
+	cfg := AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "https://auth.example.com/oauth/token?api_key=my-secret-key&client=abc",
+		Scopes:       "document:render",
+		HTTPTimeout:  10 * time.Second,
+	}
+
+	s := cfg.String()
+	assert.NotContains(t, s, "my-secret-key", "String() must not expose TokenURL query params")
+	assert.Contains(t, s, "[REDACTED]", "TokenURL query params should be redacted")
 }
 
 func TestAuthenticatedProvider_EmptyTokenFromServer(t *testing.T) {

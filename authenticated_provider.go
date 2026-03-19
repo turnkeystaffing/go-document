@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"time"
@@ -33,6 +34,8 @@ type AuthenticatedProviderConfig struct {
 	HTTPTimeout time.Duration
 }
 
+// validate checks that all required fields are set and normalizes defaults.
+// If HTTPTimeout is zero or negative, it is defaulted to defaultAuthHTTPTimeout.
 func (c *AuthenticatedProviderConfig) validate() error {
 	if c.BaseURL == "" {
 		return fmt.Errorf("document: authenticated provider: base URL is required")
@@ -74,10 +77,16 @@ func validateURL(rawURL, fieldName string) error {
 	return nil
 }
 
-// String returns a string representation with ClientSecret redacted.
+// String returns a string representation with ClientSecret redacted and
+// TokenURL query parameters stripped (may contain embedded secrets).
 func (c AuthenticatedProviderConfig) String() string {
+	sanitizedTokenURL := c.TokenURL
+	if u, err := url.Parse(c.TokenURL); err == nil && u.RawQuery != "" {
+		u.RawQuery = "[REDACTED]"
+		sanitizedTokenURL = u.String()
+	}
 	return fmt.Sprintf("{BaseURL:%s ClientID:%s ClientSecret:[REDACTED] TokenURL:%s Scopes:%s HTTPTimeout:%s}",
-		c.BaseURL, c.ClientID, c.TokenURL, c.Scopes, c.HTTPTimeout)
+		c.BaseURL, c.ClientID, sanitizedTokenURL, c.Scopes, c.HTTPTimeout)
 }
 
 // AuthenticatedProvider wraps an HTTPProvider with OAuth token management.
@@ -160,5 +169,8 @@ func (ap *AuthenticatedProvider) Close() error {
 	return ap.tokenProvider.Close()
 }
 
-// Compile-time assertion: AuthenticatedProvider implements Provider.
-var _ Provider = (*AuthenticatedProvider)(nil)
+// Compile-time assertions: AuthenticatedProvider implements Provider and io.Closer.
+var (
+	_ Provider  = (*AuthenticatedProvider)(nil)
+	_ io.Closer = (*AuthenticatedProvider)(nil)
+)
