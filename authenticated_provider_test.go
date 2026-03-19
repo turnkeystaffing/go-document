@@ -16,17 +16,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newFakeTokenServer creates a test HTTP server that returns OAuth tokens at /oauth/token.
+// fakeToken is the bearer token returned by newFakeTokenServer.
+const fakeToken = "fake-token-abc"
+
+// newFakeTokenServer creates a test HTTP server that returns OAuth tokens at POST /oauth/token.
+// It validates: POST method, /oauth/token path, grant_type=client_credentials, and
+// Authorization header presence (Basic auth credentials).
 func newFakeTokenServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if r.URL.Path != "/oauth/token" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		// Validate client credentials are present (Basic auth).
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client"})
+			return
+		}
+		// Validate grant_type is client_credentials.
+		if err := r.ParseForm(); err != nil || r.FormValue("grant_type") != "client_credentials" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unsupported_grant_type"})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "fake-token-abc",
+			"access_token": fakeToken,
 			"token_type":   "Bearer",
 			"expires_in":   3600,
 		})
@@ -120,32 +141,38 @@ func TestNewAuthenticatedProvider_NilLoggerPanics(t *testing.T) {
 func TestNewAuthenticatedProvider_DefaultHTTPTimeout(t *testing.T) {
 	t.Parallel()
 
-	tokenServer := newFakeTokenServer(t)
-	defer tokenServer.Close()
-
-	// Zero timeout should default to 10s
-	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+	// Verify validate() defaults HTTPTimeout to 10s for zero value.
+	cfg := AuthenticatedProviderConfig{
 		BaseURL:      "https://docs.example.com",
 		ClientID:     "test",
 		ClientSecret: "secret",
-		TokenURL:     tokenServer.URL + "/oauth/token",
+		TokenURL:     "https://auth.example.com/oauth/token",
 		HTTPTimeout:  0,
-	}, slog.Default())
-	require.NoError(t, err)
-	defer provider.Close()
-	assert.NotNil(t, provider)
+	}
+	require.NoError(t, cfg.validate())
+	assert.Equal(t, 10*time.Second, cfg.HTTPTimeout, "zero timeout should default to 10s")
 
-	// Negative timeout should also default to 10s
-	provider2, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+	// Verify validate() defaults HTTPTimeout to 10s for negative value.
+	cfg2 := AuthenticatedProviderConfig{
 		BaseURL:      "https://docs.example.com",
 		ClientID:     "test",
 		ClientSecret: "secret",
-		TokenURL:     tokenServer.URL + "/oauth/token",
+		TokenURL:     "https://auth.example.com/oauth/token",
 		HTTPTimeout:  -5 * time.Second,
-	}, slog.Default())
-	require.NoError(t, err)
-	defer provider2.Close()
-	assert.NotNil(t, provider2)
+	}
+	require.NoError(t, cfg2.validate())
+	assert.Equal(t, 10*time.Second, cfg2.HTTPTimeout, "negative timeout should default to 10s")
+
+	// Verify validate() preserves explicit positive timeout.
+	cfg3 := AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "https://auth.example.com/oauth/token",
+		HTTPTimeout:  30 * time.Second,
+	}
+	require.NoError(t, cfg3.validate())
+	assert.Equal(t, 30*time.Second, cfg3.HTTPTimeout, "explicit positive timeout should be preserved")
 }
 
 func TestAuthenticatedProvider_SuccessfulRender(t *testing.T) {
@@ -185,7 +212,7 @@ func TestAuthenticatedProvider_SuccessfulRender(t *testing.T) {
 	assert.Equal(t, pdfData, result.Data)
 	assert.Equal(t, ContentTypePDF, result.ContentType)
 	assert.Equal(t, "2", result.Metadata[MetadataKeyPages])
-	assert.Equal(t, "Bearer fake-token-abc", receivedAuth, "token should be injected via context into Authorization header")
+	assert.Equal(t, "Bearer "+fakeToken, receivedAuth, "token should be injected via context into Authorization header")
 }
 
 func TestAuthenticatedProvider_ValidationBeforeTokenAcquisition(t *testing.T) {
@@ -301,7 +328,12 @@ func TestAuthenticatedProvider_ConcurrentRenders(t *testing.T) {
 	defer tokenServer.Close()
 
 	pdfData := []byte("%PDF-concurrent")
+	var mu sync.Mutex
+	var receivedAuths []string
 	docServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedAuths = append(receivedAuths, r.Header.Get("Authorization"))
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(makeSuccessResponseBody(t, pdfData, 1, 10, 0))
 	}))
@@ -338,6 +370,14 @@ func TestAuthenticatedProvider_ConcurrentRenders(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		assert.NoError(t, errs[i], "goroutine %d should succeed", i)
 		assert.NotNil(t, results[i], "goroutine %d should return result", i)
+	}
+
+	// Verify every concurrent request included the correct bearer token.
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, receivedAuths, goroutines, "doc server should receive exactly %d requests", goroutines)
+	for i, auth := range receivedAuths {
+		assert.Equal(t, "Bearer "+fakeToken, auth, "request %d should include correct bearer token", i)
 	}
 }
 
@@ -413,4 +453,213 @@ func TestAuthenticatedProvider_ServerErrorPropagation(t *testing.T) {
 	assert.Equal(t, 500, pe.StatusCode)
 	assert.Equal(t, "server_error", pe.Code)
 	assert.Equal(t, "internal error", pe.Description)
+}
+
+func TestAuthenticatedProvider_RenderAfterClose(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := newFakeTokenServer(t)
+	defer tokenServer.Close()
+
+	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		TokenURL:     tokenServer.URL + "/oauth/token",
+		HTTPTimeout:  2 * time.Second,
+	}, slog.Default())
+	require.NoError(t, err)
+
+	require.NoError(t, provider.Close())
+
+	// Render after Close should fail during token acquisition.
+	_, err = provider.Render(context.Background(), RenderRequest{
+		Content:     "<h1>Hello</h1>",
+		ContentType: ContentTypeHTML,
+		Format:      FormatPDF,
+	})
+	require.Error(t, err, "Render after Close should fail")
+	var pe *ProviderError
+	require.True(t, errors.As(err, &pe), "error should be *ProviderError")
+	assert.Equal(t, "token_acquisition_failed", pe.Code)
+}
+
+func TestAuthenticatedProvider_ContextDeadlineErrorChain(t *testing.T) {
+	t.Parallel()
+
+	// Slow token server — will be cancelled before responding.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+	}))
+	defer tokenServer.Close()
+
+	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		TokenURL:     tokenServer.URL + "/oauth/token",
+		HTTPTimeout:  10 * time.Second,
+	}, slog.Default())
+	require.NoError(t, err)
+	defer provider.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err = provider.Render(ctx, RenderRequest{
+		Content:     "<h1>Hello</h1>",
+		ContentType: ContentTypeHTML,
+		Format:      FormatPDF,
+	})
+
+	require.Error(t, err)
+	var pe *ProviderError
+	require.True(t, errors.As(err, &pe), "error should be *ProviderError")
+	assert.Equal(t, "token_acquisition_failed", pe.Code)
+	// Verify the error chain preserves the context error — consumers can use
+	// errors.Is(err, context.DeadlineExceeded) to distinguish cancellation
+	// from other token failures.
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"error chain should preserve context.DeadlineExceeded for consumer detection")
+}
+
+func TestNewAuthenticatedProvider_ScopesOptional(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := newFakeTokenServer(t)
+	defer tokenServer.Close()
+
+	pdfData := []byte("%PDF-no-scopes")
+	docServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(makeSuccessResponseBody(t, pdfData, 1, 50, 0))
+	}))
+	defer docServer.Close()
+
+	// Scopes is deliberately omitted (empty string) — should work fine.
+	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      docServer.URL,
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		TokenURL:     tokenServer.URL + "/oauth/token",
+	}, slog.Default())
+	require.NoError(t, err)
+	defer provider.Close()
+
+	result, err := provider.Render(context.Background(), RenderRequest{
+		Content:     "<p>No scopes</p>",
+		ContentType: ContentTypeHTML,
+		Format:      FormatPDF,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, pdfData, result.Data)
+}
+
+func TestNewAuthenticatedProvider_InvalidBaseURLScheme(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "ftp://docs.example.com",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "https://auth.example.com/oauth/token",
+	}, slog.Default())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base URL must use http or https scheme")
+}
+
+func TestNewAuthenticatedProvider_InvalidTokenURLScheme(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "file:///etc/passwd",
+	}, slog.Default())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token URL must use http or https scheme")
+}
+
+func TestNewAuthenticatedProvider_BaseURLNoHost(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "http://",
+		ClientID:     "test",
+		ClientSecret: "secret",
+		TokenURL:     "https://auth.example.com/oauth/token",
+	}, slog.Default())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base URL must include a host")
+}
+
+func TestAuthenticatedProviderConfig_StringRedactsSecret(t *testing.T) {
+	t.Parallel()
+
+	cfg := AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "my-client",
+		ClientSecret: "super-secret-value",
+		TokenURL:     "https://auth.example.com/oauth/token",
+		Scopes:       "document:render",
+		HTTPTimeout:  10 * time.Second,
+	}
+
+	s := cfg.String()
+	assert.Contains(t, s, "my-client")
+	assert.Contains(t, s, "[REDACTED]")
+	assert.NotContains(t, s, "super-secret-value", "String() must not expose ClientSecret")
+}
+
+func TestAuthenticatedProvider_EmptyTokenFromServer(t *testing.T) {
+	t.Parallel()
+
+	// Token server that returns an empty access_token.
+	// go-authclient validates internally and returns an error — the empty
+	// token check in AuthenticatedProvider.Render (lines 115-120) is
+	// defense-in-depth that is unreachable with go-authclient.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	provider, err := NewAuthenticatedProvider(AuthenticatedProviderConfig{
+		BaseURL:      "https://docs.example.com",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		TokenURL:     tokenServer.URL + "/oauth/token",
+		HTTPTimeout:  2 * time.Second,
+	}, slog.Default())
+	require.NoError(t, err)
+	defer provider.Close()
+
+	_, err = provider.Render(context.Background(), RenderRequest{
+		Content:     "<h1>Hello</h1>",
+		ContentType: ContentTypeHTML,
+		Format:      FormatPDF,
+	})
+
+	// go-authclient catches empty tokens as acquisition failures.
+	require.Error(t, err)
+	var pe *ProviderError
+	require.True(t, errors.As(err, &pe), "error should be *ProviderError")
+	assert.Equal(t, "token_acquisition_failed", pe.Code)
 }

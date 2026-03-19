@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/turnkeystaffing/go-authclient"
@@ -36,6 +37,9 @@ func (c *AuthenticatedProviderConfig) validate() error {
 	if c.BaseURL == "" {
 		return fmt.Errorf("document: authenticated provider: base URL is required")
 	}
+	if err := validateURL(c.BaseURL, "base URL"); err != nil {
+		return err
+	}
 	if c.ClientID == "" {
 		return fmt.Errorf("document: authenticated provider: client ID is required")
 	}
@@ -45,14 +49,40 @@ func (c *AuthenticatedProviderConfig) validate() error {
 	if c.TokenURL == "" {
 		return fmt.Errorf("document: authenticated provider: token URL is required")
 	}
+	if err := validateURL(c.TokenURL, "token URL"); err != nil {
+		return err
+	}
 	if c.HTTPTimeout <= 0 {
 		c.HTTPTimeout = defaultAuthHTTPTimeout
 	}
 	return nil
 }
 
+// validateURL checks that rawURL is a syntactically valid URL with http or https
+// scheme and a non-empty host.
+func validateURL(rawURL, fieldName string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("document: authenticated provider: %s is not a valid URL", fieldName)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("document: authenticated provider: %s must use http or https scheme", fieldName)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("document: authenticated provider: %s must include a host", fieldName)
+	}
+	return nil
+}
+
+// String returns a string representation with ClientSecret redacted.
+func (c AuthenticatedProviderConfig) String() string {
+	return fmt.Sprintf("{BaseURL:%s ClientID:%s ClientSecret:[REDACTED] TokenURL:%s Scopes:%s HTTPTimeout:%s}",
+		c.BaseURL, c.ClientID, c.TokenURL, c.Scopes, c.HTTPTimeout)
+}
+
 // AuthenticatedProvider wraps an HTTPProvider with OAuth token management.
 // It implements Provider for rendering documents and io.Closer for graceful shutdown.
+// All methods are safe for concurrent use from multiple goroutines.
 type AuthenticatedProvider struct {
 	provider      Provider
 	tokenProvider *authclient.OAuthTokenProvider
@@ -98,6 +128,7 @@ func NewAuthenticatedProvider(cfg AuthenticatedProviderConfig, logger *slog.Logg
 // Render validates the request, acquires an OAuth token, and delegates to the
 // internal HTTPProvider. Validation happens before token acquisition to avoid
 // wasted OAuth token fetches for invalid requests.
+// Must not be called after Close — token acquisition will fail.
 func (ap *AuthenticatedProvider) Render(ctx context.Context, req RenderRequest) (*RenderResult, error) {
 	if err := ValidateRenderRequest(req); err != nil {
 		return nil, err
