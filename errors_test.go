@@ -163,6 +163,11 @@ func TestSentinelErrors(t *testing.T) {
 	assert.EqualError(t, ErrResponseTooLarge, "document: response too large")
 }
 
+func TestErrResponseTooLargeWrapped(t *testing.T) {
+	wrapped := fmt.Errorf("fetch failed: %w", ErrResponseTooLarge)
+	assert.True(t, errors.Is(wrapped, ErrResponseTooLarge), "errors.Is should find wrapped ErrResponseTooLarge")
+}
+
 func TestProviderErrorErrorsAsWrapped(t *testing.T) {
 	pe := &ProviderError{
 		StatusCode:  429,
