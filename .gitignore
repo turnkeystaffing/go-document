@@ -1,8 +1,22 @@
-.idea
+# IDE files
+.idea/
 .vscode/
-/vendor/
-composer.lock
-.phpunit.result.cache
-.php-cs-fixer.cache
-*.cache
+*.swp
+*.swo
+
+# Go artifacts
+vendor/
+*.exe
+*.test
+*.out
+*.prof
+*.coverprofile
+coverage.html
+__debug_bin*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
 .env
