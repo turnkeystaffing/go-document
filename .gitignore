@@ -1,0 +1,18 @@
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go artifacts
+vendor/
+*.exe
+*.test
+*.out
+*.prof
+*.coverprofile
+coverage.html
+
+# OS files
+.DS_Store
+Thumbs.db
