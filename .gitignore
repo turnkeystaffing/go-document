@@ -12,6 +12,7 @@ vendor/
 *.prof
 *.coverprofile
 coverage.html
+__debug_bin*
 
 # OS files
 .DS_Store

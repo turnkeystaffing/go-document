@@ -308,6 +308,10 @@ func TestMetadataKeyConstants(t *testing.T) {
 	assert.Equal(t, "blocked_resources", MetadataKeyBlockedResources)
 }
 
+func TestMaxResultDataSizeConstant(t *testing.T) {
+	assert.Equal(t, 50*1024*1024, MaxResultDataSize, "MaxResultDataSize should be 50MB")
+}
+
 func TestRenderRequestZeroValueIsValid(t *testing.T) {
 	// AC2: zero-value RenderRequest{} is valid Go (no required constructor).
 	var req RenderRequest

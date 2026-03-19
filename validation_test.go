@@ -80,6 +80,8 @@ func TestValidateRenderRequestUnsupportedContentType(t *testing.T) {
 	assert.Equal(t, "unsupported", ve.Code)
 	assert.Contains(t, ve.Message, "text/html")
 	assert.Contains(t, ve.Message, "text/markdown")
+	// Security: user-supplied value must NOT be reflected in error message.
+	assert.NotContains(t, ve.Message, "application/json", "error message must not echo user input")
 }
 
 func TestValidateRenderRequestEmptyFormat(t *testing.T) {
@@ -108,6 +110,8 @@ func TestValidateRenderRequestUnsupportedFormat(t *testing.T) {
 	require.True(t, errors.As(err, &ve))
 	assert.Equal(t, "format", ve.Field)
 	assert.Equal(t, "unsupported", ve.Code)
+	// Security: user-supplied value must NOT be reflected in error message.
+	assert.NotContains(t, ve.Message, "png", "error message must not echo user input")
 }
 
 func TestValidateRenderRequestMarkdownCustomCSSAtExactMaxSize(t *testing.T) {

@@ -4,7 +4,7 @@
 // via a Provider interface. This package defines the public API types and
 // interface. It does not import any internal packages.
 //
-// Provider implementations included in this package:
+// Provider implementations included (or planned) in this package:
 //
 //   - HTTPProvider: calls the document rendering service over HTTP
 //   - AuthenticatedProvider: wraps HTTPProvider with OAuth2 token injection
